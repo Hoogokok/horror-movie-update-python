@@ -34,3 +34,5 @@ urllib3==2.2.1
 websockets==12.0
 wsproto==1.2.0
 webdriver-manager==3.8.6
+
+tweepy~=4.14.0
