@@ -7,6 +7,7 @@ from update_movie_theaters import update_theaters_info
 from update_upcoming_movie import update_upcoming_movie
 from update_netflix_expiring_movie import update_netflix_expiring_movie
 from find_all_movie_info import get_all_movie_info
+from update_movie_provider import update_all_providers  # 새로 추가된 임포트
 
 logging.basicConfig(level=logging.DEBUG)
 s = sched.scheduler(time.time, time.sleep)
@@ -25,6 +26,7 @@ def update_scheduler(sc):
     update_theaters_info(cgv_movie_names, megabox_movie_names, lotte_movie_names)
     update_ended(cgv_movie_names, megabox_movie_names, lotte_movie_names)
     update_upcoming_movie()
+    update_all_providers()  # 영화 공급자 정보 업데이트
     s.enter(ONE_WEEK, 1, update_scheduler, (sc,))
 
 
