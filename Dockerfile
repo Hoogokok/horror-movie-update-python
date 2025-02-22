@@ -16,6 +16,9 @@ RUN unzip /tmp/chromedriver-linux64.zip -d /tmp
 RUN mv /tmp/chromedriver-linux64/chromedriver /usr/bin/chromedriver
 RUN chmod +x /usr/bin/chromedriver
 
+# 환경변수 설정
+COPY .env* .
+
 # Python dependencies 설치
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
