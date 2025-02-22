@@ -1,63 +1,69 @@
-from supabase import create_client, Client
-from dotenv import load_dotenv
-import os
+import asyncio
+import time
+from typing import List
+from logging_config import get_logger
+from database import get_db_pool, execute_query, execute_many
 
-load_dotenv()
-supabase_url = os.getenv('SUPABASE_URL')
-supabase_key = os.getenv('SUPABASE_KEY')
+logger = get_logger(__name__)
 
+MAX_DB_CONNECTIONS = 5
+db_semaphore = asyncio.Semaphore(MAX_DB_CONNECTIONS)
 
-def update_ended(cgv_movie_names, megabox_movie_names, lotte_movie_names):
-    client = create_client(supabase_url, supabase_key)
+async def update_ended(cgv_movie_names: List[str], lotte_movie_names: List[str]) -> None:
+    start_time = time.time()
+    logger.info("상영 종료 영화 업데이트 시작")
+    
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            movie_info = await conn.fetch("SELECT id, title FROM movie")
+            
+            cgv_ended_movies = [i['id'] for i in movie_info if i['title'] not in cgv_movie_names]
+            lotte_ended_movies = [i['id'] for i in movie_info if i['title'] not in lotte_movie_names]
 
-    # 데이터베이스에서 영화정보를 가져옴
-    movie_info = client.table('upcoming_movie').select('pk', 'title').execute().data
-    # 저장된 영화정보와 스크래핑한 영화정보를 비교하여 영화관에서 상영이 끝난 영화를 찾음
-    cgv_ended_movies = []
-    megabox_ended_movies = []
-    lotte_ended_movies = []
-    for i in movie_info:
-        if i['title'] not in cgv_movie_names:
-            cgv_ended_movies.append(i['pk'])
+            theater_ids = {
+                'CGV': await find_theater_id(conn, 'CGV'),
+                '롯데시네마': await find_theater_id(conn, '롯데시네마')
+            }
 
-        if i['title'] not in megabox_movie_names:
-            megabox_ended_movies.append(i['pk'])
+            for theater_name, ended_movies in [
+                ('CGV', cgv_ended_movies),
+                ('롯데시네마', lotte_ended_movies)
+            ]:
+                theater_id = theater_ids[theater_name]
+                if theater_id and ended_movies:
+                    if await find_movie_theater_info(conn, ended_movies, theater_id):
+                        await delete_ended_movie_theater_info(conn, ended_movies, theater_id)
+                        logger.info("영화 상영 정보 삭제 완료", extra={"theater": theater_name, "deleted_count": len(ended_movies)})
+                else:
+                    logger.warning("영화관 정보 없음 또는 종료된 영화 없음", extra={"theater": theater_name})
 
-        if i['title'] not in lotte_movie_names:
-            lotte_ended_movies.append(i['pk'])
+    except Exception as e:
+        logger.exception("상영 종료 영화 업데이트 중 오류 발생")
+    
+    end_time = time.time()
+    logger.info("상영 종료 영화 업데이트 완료", extra={"execution_time": f"{end_time - start_time:.2f}초"})
 
-    # 영화관 아이디를 찾는다.
-    cgv_theater_id = find_theater_id(client, 'CGV')
-    megabox_theater_id = find_theater_id(client, '메가박스')
-    lotte_theater_id = find_theater_id(client, '롯데시네마')
+async def delete_ended_movie_theater_info(conn, movie_ids: List[int], theater_id: int) -> None:
+    async with db_semaphore:
+        query = """
+        DELETE FROM movie_theaters
+        WHERE movie_id = $1 AND theaters_id = $2
+        """
+        try:
+            await conn.executemany(query, [(movie_id, theater_id) for movie_id in movie_ids])
+        except Exception as e:
+            logger.error("영화 상영 정보 삭제 중 오류 발생", extra={"error": str(e), "movie_ids": movie_ids, "theater_id": theater_id})
+            raise
 
-    # 상영관 정보가 저장되어 있는지 확인
-    cgv_movie_theater_info = find_movie_theater_info(client, cgv_ended_movies, cgv_theater_id)
-    megabox_movie_theater_info = find_movie_theater_info(client, megabox_ended_movies, megabox_theater_id)
-    lotte_movie_theater_info = find_movie_theater_info(client, lotte_ended_movies, lotte_theater_id)
+async def find_theater_id(conn, movie_theater_name: str) -> int:
+    query = "SELECT id FROM theaters WHERE name = $1"
+    result = await conn.fetchrow(query, movie_theater_name)
+    return result['id'] if result else None
 
-    # 상영관 정보가 저장되어 있으면 삭제
-    if cgv_movie_theater_info:
-        delete_ended_movie_theater_info(client, cgv_ended_movies, cgv_theater_id)
-    if megabox_movie_theater_info:
-        delete_ended_movie_theater_info(client, megabox_ended_movies, megabox_theater_id)
-    if lotte_movie_theater_info:
-        delete_ended_movie_theater_info(client, lotte_ended_movies, lotte_theater_id)
-
-
-def delete_ended_movie_theater_info(client: Client, movie_ids: list, theater_id: int):
-    data, _ = (client.table('movie_theaters').delete().in_('movie_id', movie_ids)
-                   .eq('theaters_id', theater_id).execute())
-    return data
-
-
-def find_theater_id(client: Client, movie_theater_name: str):
-    data, _ = client.table('theaters').select('id').eq('name', movie_theater_name).execute()
-    return data[1][0]['id']
-
-
-def find_movie_theater_info(client: Client, movie_ids: list, theater_id: int):
-    return (client.table('movie_theaters').select('id').in_('movie_id', movie_ids)
-            .eq('theaters_id', theater_id)
-            .execute()
-            .data)
+async def find_movie_theater_info(conn, movie_ids: List[int], theater_id: int) -> List[dict]:
+    query = """
+    SELECT id FROM movie_theaters
+    WHERE movie_id = ANY($1) AND theaters_id = $2
+    """
+    return await conn.fetch(query, movie_ids, theater_id) # 실제 사용 시 영화 이름 리스트를 넣어주세요
